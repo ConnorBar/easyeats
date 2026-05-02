@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:intl/intl.dart';
 
+import '../api/client.dart' show friendlyApiError;
 import '../api/inventory_api.dart';
 import '../models/inventory_item.dart';
 
@@ -14,12 +15,13 @@ class _BatchRowData {
   DateTime? expireDate;
 
   _BatchRowData({double? qty, this.expireDate})
-      : qtyCtrl = TextEditingController(
-            text: qty != null
-                ? (qty == qty.roundToDouble()
-                    ? qty.toInt().toString()
-                    : qty.toStringAsFixed(2))
-                : '');
+    : qtyCtrl = TextEditingController(
+        text: qty != null
+            ? (qty == qty.roundToDouble()
+                  ? qty.toInt().toString()
+                  : qty.toStringAsFixed(2))
+            : '',
+      );
 
   void dispose() => qtyCtrl.dispose();
 }
@@ -32,8 +34,7 @@ class AddIngredientSheet extends ConsumerStatefulWidget {
   const AddIngredientSheet({super.key, this.item});
 
   @override
-  ConsumerState<AddIngredientSheet> createState() =>
-      _AddIngredientSheetState();
+  ConsumerState<AddIngredientSheet> createState() => _AddIngredientSheetState();
 }
 
 class _AddIngredientSheetState extends ConsumerState<AddIngredientSheet> {
@@ -55,9 +56,38 @@ class _AddIngredientSheetState extends ConsumerState<AddIngredientSheet> {
 
   bool get _isEdit => widget.item != null;
 
+  // Recomputes canSave whenever any watched controller changes.
+  void _rebuild() => setState(() {});
+
+  bool get _canSave {
+    if (_saving) return false;
+    if (_isEdit) {
+      if (_nameCtrl.text.trim().isEmpty) return false;
+      // Every batch must have a parseable quantity > 0
+      return _batchRows.every((r) {
+        final v = double.tryParse(r.qtyCtrl.text);
+        return v != null && v > 0;
+      });
+    } else {
+      // Add mode: just need a valid positive qty (name validated on submit)
+      final v = double.tryParse(_qtyCtrl.text.trim());
+      return v != null && v > 0;
+    }
+  }
+
+  /// Creates a new batch row and attaches the rebuild listener to its controller.
+  _BatchRowData _makeBatchRow({double? qty, DateTime? expireDate}) {
+    final row = _BatchRowData(qty: qty, expireDate: expireDate);
+    row.qtyCtrl.addListener(_rebuild);
+    return row;
+  }
+
   @override
   void initState() {
     super.initState();
+    _nameCtrl.addListener(_rebuild);
+    _qtyCtrl.addListener(_rebuild);
+
     final it = widget.item;
     if (it != null) {
       _matchedItem = it;
@@ -65,14 +95,17 @@ class _AddIngredientSheetState extends ConsumerState<AddIngredientSheet> {
       _nameCtrl.text = it.name;
       _unit = _units.contains(it.unit) ? it.unit : 'whole';
       for (final b in it.batches) {
-        _batchRows.add(_BatchRowData(
-          qty: b.quantity,
-          expireDate:
-              b.expireDate != null ? DateTime.tryParse(b.expireDate!) : null,
-        ));
+        _batchRows.add(
+          _makeBatchRow(
+            qty: b.quantity,
+            expireDate: b.expireDate != null
+                ? DateTime.tryParse(b.expireDate!)
+                : null,
+          ),
+        );
       }
       if (_batchRows.isEmpty) {
-        _batchRows.add(_BatchRowData(qty: it.quantity));
+        _batchRows.add(_makeBatchRow(qty: it.quantity));
       }
     }
   }
@@ -89,7 +122,10 @@ class _AddIngredientSheetState extends ConsumerState<AddIngredientSheet> {
     super.dispose();
   }
 
-  Future<void> _pickDate({DateTime? initial, ValueChanged<DateTime>? onPicked}) async {
+  Future<void> _pickDate({
+    DateTime? initial,
+    ValueChanged<DateTime>? onPicked,
+  }) async {
     final picked = await showDatePicker(
       context: context,
       initialDate: initial ?? DateTime.now().add(const Duration(days: 7)),
@@ -103,15 +139,22 @@ class _AddIngredientSheetState extends ConsumerState<AddIngredientSheet> {
 
   Future<void> _save() async {
     setState(() => _saving = true);
-
-    if (_isEdit) {
-      await _saveEdit();
-    } else {
-      await _saveAdd();
+    try {
+      if (_isEdit) {
+        await _saveEdit();
+      } else {
+        await _saveAdd();
+      }
+      ref.invalidate(inventoryProvider);
+      if (mounted) Navigator.pop(context);
+    } catch (e) {
+      if (mounted) {
+        setState(() => _saving = false);
+        ScaffoldMessenger.of(context)
+          ..clearSnackBars()
+          ..showSnackBar(SnackBar(content: Text(friendlyApiError(e))));
+      }
     }
-
-    ref.invalidate(inventoryProvider);
-    if (mounted) Navigator.pop(context);
   }
 
   Future<void> _saveAdd() async {
@@ -121,16 +164,18 @@ class _AddIngredientSheetState extends ConsumerState<AddIngredientSheet> {
       setState(() => _saving = false);
       ScaffoldMessenger.of(context)
         ..clearSnackBars()
-        ..showSnackBar(const SnackBar(
-            content: Text('Name and valid quantity are required')));
+        ..showSnackBar(
+          const SnackBar(content: Text('Name and valid quantity are required')),
+        );
       return;
     }
 
     final expStr = _expireDate?.toIso8601String().split('T').first;
 
     if (_matchedItem != null) {
-      final List<Map<String, dynamic>> history =
-          _matchedItem!.priceHistory.map((e) => e.toJson()).toList();
+      final List<Map<String, dynamic>> history = _matchedItem!.priceHistory
+          .map((e) => e.toJson())
+          .toList();
       if (_storeCtrl.text.trim().isNotEmpty &&
           _priceCtrl.text.trim().isNotEmpty) {
         history.add({
@@ -155,7 +200,7 @@ class _AddIngredientSheetState extends ConsumerState<AddIngredientSheet> {
             'store': _storeCtrl.text.trim(),
             'price': double.tryParse(_priceCtrl.text.trim()) ?? 0,
             'date': DateFormat('yyyy-MM-dd').format(DateTime.now()),
-          }
+          },
         ];
       }
       await InventoryApi.create(data);
@@ -168,18 +213,35 @@ class _AddIngredientSheetState extends ConsumerState<AddIngredientSheet> {
       setState(() => _saving = false);
       ScaffoldMessenger.of(context)
         ..clearSnackBars()
-        ..showSnackBar(
-            const SnackBar(content: Text('Name is required')));
+        ..showSnackBar(const SnackBar(content: Text('Name is required')));
       return;
     }
 
+    // Validate every batch quantity explicitly — never silently drop rows.
+    for (int i = 0; i < _batchRows.length; i++) {
+      final v = double.tryParse(_batchRows[i].qtyCtrl.text);
+      if (v == null || v <= 0) {
+        setState(() => _saving = false);
+        ScaffoldMessenger.of(context)
+          ..clearSnackBars()
+          ..showSnackBar(
+            SnackBar(
+              content: Text(
+                'Batch ${i + 1} needs a valid quantity greater than 0',
+              ),
+            ),
+          );
+        return;
+      }
+    }
+
     final batches = _batchRows
-        .map((r) => {
-              'quantity': double.tryParse(r.qtyCtrl.text) ?? 0,
-              'expireDate':
-                  r.expireDate?.toIso8601String().split('T').first,
-            })
-        .where((b) => (b['quantity'] as double?) != null && (b['quantity'] as double) > 0)
+        .map(
+          (r) => {
+            'quantity': double.parse(r.qtyCtrl.text),
+            'expireDate': r.expireDate?.toIso8601String().split('T').first,
+          },
+        )
         .toList();
 
     final data = <String, dynamic>{
@@ -188,8 +250,9 @@ class _AddIngredientSheetState extends ConsumerState<AddIngredientSheet> {
       'batches': batches,
     };
 
-    final List<Map<String, dynamic>> history =
-        widget.item!.priceHistory.map((e) => e.toJson()).toList();
+    final List<Map<String, dynamic>> history = widget.item!.priceHistory
+        .map((e) => e.toJson())
+        .toList();
     if (_storeCtrl.text.trim().isNotEmpty &&
         _priceCtrl.text.trim().isNotEmpty) {
       history.add({
@@ -239,8 +302,7 @@ class _AddIngredientSheetState extends ConsumerState<AddIngredientSheet> {
               children: [
                 Text(
                   '${_batchRows.length - 1} more batch${_batchRows.length - 1 > 1 ? 'es' : ''}',
-                  style: TextStyle(
-                      fontSize: 13, color: Colors.grey.shade700),
+                  style: TextStyle(fontSize: 13, color: Colors.grey.shade700),
                 ),
                 const Spacer(),
                 Icon(
@@ -252,15 +314,15 @@ class _AddIngredientSheetState extends ConsumerState<AddIngredientSheet> {
           ),
         ),
         if (_batchesExpanded)
-          ...List.generate(_batchRows.length, (i) => i)
-              .where((i) => i != soonestIdx)
-              .map((i) => _buildBatchRow(i)),
+          ...List.generate(
+            _batchRows.length,
+            (i) => i,
+          ).where((i) => i != soonestIdx).map((i) => _buildBatchRow(i)),
       ],
       Align(
         alignment: Alignment.centerLeft,
         child: TextButton.icon(
-          onPressed: () =>
-              setState(() => _batchRows.add(_BatchRowData())),
+          onPressed: () => setState(() => _batchRows.add(_makeBatchRow())),
           icon: const Icon(Icons.add, size: 18),
           label: const Text('Add batch'),
         ),
@@ -281,20 +343,20 @@ class _AddIngredientSheetState extends ConsumerState<AddIngredientSheet> {
       children: [
         Expanded(
           child: _PriceStat(
-              label: 'Best Price',
-              value: '\$${best.toStringAsFixed(2)}'),
+            label: 'Best Price',
+            value: '\$${best.toStringAsFixed(2)}',
+          ),
         ),
         const SizedBox(width: 12),
         Expanded(
           child: _PriceStat(
-              label: 'Avg Price',
-              value: '\$${avg.toStringAsFixed(2)}'),
+            label: 'Avg Price',
+            value: '\$${avg.toStringAsFixed(2)}',
+          ),
         ),
         const SizedBox(width: 12),
         Expanded(
-          child: _PriceStat(
-              label: 'Entries',
-              value: '${history.length}'),
+          child: _PriceStat(label: 'Entries', value: '${history.length}'),
         ),
       ],
     );
@@ -313,8 +375,10 @@ class _AddIngredientSheetState extends ConsumerState<AddIngredientSheet> {
             padding: const EdgeInsets.symmetric(vertical: 4),
             child: Row(
               children: [
-                Text('Price History',
-                    style: Theme.of(context).textTheme.titleSmall),
+                Text(
+                  'Price History',
+                  style: Theme.of(context).textTheme.titleSmall,
+                ),
                 const Spacer(),
                 Icon(
                   _historyExpanded ? Icons.expand_less : Icons.expand_more,
@@ -330,7 +394,7 @@ class _AddIngredientSheetState extends ConsumerState<AddIngredientSheet> {
             child: ListView.separated(
               shrinkWrap: true,
               itemCount: sorted.length,
-              separatorBuilder: (_, __) => const Divider(height: 1),
+              separatorBuilder: (_, _) => const Divider(height: 1),
               itemBuilder: (context, index) {
                 final e = sorted[index];
                 return Padding(
@@ -338,19 +402,25 @@ class _AddIngredientSheetState extends ConsumerState<AddIngredientSheet> {
                   child: Row(
                     children: [
                       Expanded(
-                        child: Text(e.store,
-                            style: const TextStyle(fontSize: 13)),
+                        child: Text(
+                          e.store,
+                          style: const TextStyle(fontSize: 13),
+                        ),
                       ),
                       Text(
                         '\$${e.price.toStringAsFixed(2)}',
                         style: const TextStyle(
-                            fontSize: 13, fontWeight: FontWeight.w600),
+                          fontSize: 13,
+                          fontWeight: FontWeight.w600,
+                        ),
                       ),
                       const SizedBox(width: 12),
                       Text(
                         e.date,
                         style: TextStyle(
-                            fontSize: 12, color: Colors.grey.shade600),
+                          fontSize: 12,
+                          color: Colors.grey.shade600,
+                        ),
                       ),
                     ],
                   ),
@@ -380,8 +450,10 @@ class _AddIngredientSheetState extends ConsumerState<AddIngredientSheet> {
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            Text(_isEdit ? 'Edit Ingredient' : 'Add Ingredient',
-                style: Theme.of(context).textTheme.titleLarge),
+            Text(
+              _isEdit ? 'Edit Ingredient' : 'Add Ingredient',
+              style: Theme.of(context).textTheme.titleLarge,
+            ),
             const SizedBox(height: 16),
 
             // ── Name field ──
@@ -389,15 +461,22 @@ class _AddIngredientSheetState extends ConsumerState<AddIngredientSheet> {
               TextField(
                 controller: _nameCtrl,
                 decoration: const InputDecoration(
-                    labelText: 'Name', border: OutlineInputBorder()),
+                  labelText: 'Name',
+                  border: OutlineInputBorder(),
+                ),
                 textCapitalization: TextCapitalization.words,
+                maxLength: 100,
               )
             else
               inventoryAsync.when(
                 loading: () => const LinearProgressIndicator(),
                 error: (_, _) => TextField(
                   decoration: const InputDecoration(
-                      labelText: 'Name', border: OutlineInputBorder()),
+                    labelText: 'Name',
+                    border: OutlineInputBorder(),
+                    counterText: '',
+                  ),
+                  maxLength: 100,
                   onChanged: (v) {
                     _typedName = v;
                     _matchedItem = null;
@@ -408,41 +487,46 @@ class _AddIngredientSheetState extends ConsumerState<AddIngredientSheet> {
                     if (textEditingValue.text.isEmpty) return inventory;
                     final lower = textEditingValue.text.toLowerCase();
                     return inventory.where(
-                        (i) => i.name.toLowerCase().contains(lower));
+                      (i) => i.name.toLowerCase().contains(lower),
+                    );
                   },
                   displayStringForOption: (i) => i.name,
                   onSelected: (item) {
                     _matchedItem = item;
                     _typedName = item.name;
-                    _unit =
-                        _units.contains(item.unit) ? item.unit : 'whole';
+                    _unit = _units.contains(item.unit) ? item.unit : 'whole';
                     setState(() {});
                   },
                   fieldViewBuilder:
                       (context, controller, focusNode, onSubmitted) {
-                    return TextField(
-                      controller: controller,
-                      focusNode: focusNode,
-                      textCapitalization: TextCapitalization.words,
-                      decoration: InputDecoration(
-                        labelText: 'Name',
-                        border: const OutlineInputBorder(),
-                        suffixIcon: _matchedItem != null
-                            ? const Icon(Icons.link,
-                                color: Colors.green, size: 20)
-                            : null,
-                      ),
-                      onChanged: (v) {
-                        _typedName = v;
-                        if (_matchedItem != null &&
-                            _matchedItem!.name.toLowerCase() !=
-                                v.trim().toLowerCase()) {
-                          _matchedItem = null;
-                          setState(() {});
-                        }
+                        return TextField(
+                          controller: controller,
+                          focusNode: focusNode,
+                          textCapitalization: TextCapitalization.words,
+                          maxLength: 100,
+                          decoration: InputDecoration(
+                            labelText: 'Name',
+                            border: const OutlineInputBorder(),
+                            counterText: '',
+                            suffixIcon: _matchedItem != null
+                                ? const Icon(
+                                    Icons.link,
+                                    color: Colors.green,
+                                    size: 20,
+                                  )
+                                : null,
+                          ),
+                          onChanged: (v) {
+                            _typedName = v;
+                            if (_matchedItem != null &&
+                                _matchedItem!.name.toLowerCase() !=
+                                    v.trim().toLowerCase()) {
+                              _matchedItem = null;
+                              setState(() {});
+                            }
+                          },
+                        );
                       },
-                    );
-                  },
                 ),
               ),
 
@@ -452,8 +536,7 @@ class _AddIngredientSheetState extends ConsumerState<AddIngredientSheet> {
                 child: Text(
                   'Will add batch to "${_matchedItem!.name}" '
                   '(${_fmtQty(_matchedItem!.quantity)} ${_matchedItem!.unit} total)',
-                  style:
-                      TextStyle(fontSize: 12, color: Colors.green.shade700),
+                  style: TextStyle(fontSize: 12, color: Colors.green.shade700),
                 ),
               ),
 
@@ -468,10 +551,12 @@ class _AddIngredientSheetState extends ConsumerState<AddIngredientSheet> {
                     child: TextField(
                       controller: _qtyCtrl,
                       decoration: const InputDecoration(
-                          labelText: 'Quantity',
-                          border: OutlineInputBorder()),
+                        labelText: 'Quantity',
+                        border: OutlineInputBorder(),
+                      ),
                       keyboardType: const TextInputType.numberWithOptions(
-                          decimal: true),
+                        decimal: true,
+                      ),
                     ),
                   ),
                   const SizedBox(width: 12),
@@ -480,11 +565,13 @@ class _AddIngredientSheetState extends ConsumerState<AddIngredientSheet> {
                     child: DropdownButtonFormField<String>(
                       initialValue: _unit,
                       decoration: const InputDecoration(
-                          labelText: 'Unit',
-                          border: OutlineInputBorder()),
+                        labelText: 'Unit',
+                        border: OutlineInputBorder(),
+                      ),
                       items: _units
-                          .map((u) =>
-                              DropdownMenuItem(value: u, child: Text(u)))
+                          .map(
+                            (u) => DropdownMenuItem(value: u, child: Text(u)),
+                          )
                           .toList(),
                       onChanged: (v) {
                         if (v != null) setState(() => _unit = v);
@@ -500,9 +587,11 @@ class _AddIngredientSheetState extends ConsumerState<AddIngredientSheet> {
                   onPicked: (d) => setState(() => _expireDate = d),
                 ),
                 icon: const Icon(Icons.calendar_today, size: 18),
-                label: Text(_expireDate != null
-                    ? 'Expires: ${DateFormat.yMMMd().format(_expireDate!)}'
-                    : 'Set expiration date (optional)'),
+                label: Text(
+                  _expireDate != null
+                      ? 'Expires: ${DateFormat.yMMMd().format(_expireDate!)}'
+                      : 'Set expiration date (optional)',
+                ),
               ),
             ],
 
@@ -511,10 +600,11 @@ class _AddIngredientSheetState extends ConsumerState<AddIngredientSheet> {
               DropdownButtonFormField<String>(
                 initialValue: _unit,
                 decoration: const InputDecoration(
-                    labelText: 'Unit', border: OutlineInputBorder()),
+                  labelText: 'Unit',
+                  border: OutlineInputBorder(),
+                ),
                 items: _units
-                    .map(
-                        (u) => DropdownMenuItem(value: u, child: Text(u)))
+                    .map((u) => DropdownMenuItem(value: u, child: Text(u)))
                     .toList(),
                 onChanged: (v) {
                   if (v != null) setState(() => _unit = v);
@@ -530,8 +620,10 @@ class _AddIngredientSheetState extends ConsumerState<AddIngredientSheet> {
                 _buildPriceHistoryList(widget.item!.priceHistory),
               ],
               const Divider(height: 20),
-              Text('Add Price Entry (optional)',
-                  style: Theme.of(context).textTheme.titleSmall),
+              Text(
+                'Add Price Entry (optional)',
+                style: Theme.of(context).textTheme.titleSmall,
+              ),
               const SizedBox(height: 8),
               Row(
                 children: [
@@ -539,8 +631,11 @@ class _AddIngredientSheetState extends ConsumerState<AddIngredientSheet> {
                     child: TextField(
                       controller: _storeCtrl,
                       decoration: const InputDecoration(
-                          labelText: 'Store',
-                          border: OutlineInputBorder()),
+                        labelText: 'Store',
+                        border: OutlineInputBorder(),
+                        counterText: '',
+                      ),
+                      maxLength: 100,
                     ),
                   ),
                   const SizedBox(width: 12),
@@ -548,10 +643,12 @@ class _AddIngredientSheetState extends ConsumerState<AddIngredientSheet> {
                     child: TextField(
                       controller: _priceCtrl,
                       decoration: const InputDecoration(
-                          labelText: 'Price',
-                          border: OutlineInputBorder()),
+                        labelText: 'Price',
+                        border: OutlineInputBorder(),
+                      ),
                       keyboardType: const TextInputType.numberWithOptions(
-                          decimal: true),
+                        decimal: true,
+                      ),
                     ),
                   ),
                 ],
@@ -561,8 +658,10 @@ class _AddIngredientSheetState extends ConsumerState<AddIngredientSheet> {
             // ── Price entry fields (add mode) ──
             if (!_isEdit) ...[
               const Divider(height: 20),
-              Text('Add Price Entry (optional)',
-                  style: Theme.of(context).textTheme.titleSmall),
+              Text(
+                'Add Price Entry (optional)',
+                style: Theme.of(context).textTheme.titleSmall,
+              ),
               const SizedBox(height: 8),
               Row(
                 children: [
@@ -570,8 +669,11 @@ class _AddIngredientSheetState extends ConsumerState<AddIngredientSheet> {
                     child: TextField(
                       controller: _storeCtrl,
                       decoration: const InputDecoration(
-                          labelText: 'Store',
-                          border: OutlineInputBorder()),
+                        labelText: 'Store',
+                        border: OutlineInputBorder(),
+                        counterText: '',
+                      ),
+                      maxLength: 100,
                     ),
                   ),
                   const SizedBox(width: 12),
@@ -579,10 +681,12 @@ class _AddIngredientSheetState extends ConsumerState<AddIngredientSheet> {
                     child: TextField(
                       controller: _priceCtrl,
                       decoration: const InputDecoration(
-                          labelText: 'Price',
-                          border: OutlineInputBorder()),
+                        labelText: 'Price',
+                        border: OutlineInputBorder(),
+                      ),
                       keyboardType: const TextInputType.numberWithOptions(
-                          decimal: true),
+                        decimal: true,
+                      ),
                     ),
                   ),
                 ],
@@ -591,17 +695,20 @@ class _AddIngredientSheetState extends ConsumerState<AddIngredientSheet> {
 
             const SizedBox(height: 20),
             FilledButton(
-              onPressed: _saving ? null : _save,
+              onPressed: _canSave ? _save : null,
               child: _saving
                   ? const SizedBox(
                       height: 20,
                       width: 20,
-                      child: CircularProgressIndicator(strokeWidth: 2))
-                  : Text(_isEdit
-                      ? 'Save Changes'
-                      : _matchedItem != null
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
+                  : Text(
+                      _isEdit
+                          ? 'Save Changes'
+                          : _matchedItem != null
                           ? 'Add to ${_matchedItem!.name}'
-                          : 'Add'),
+                          : 'Add',
+                    ),
             ),
           ],
         ),
@@ -611,12 +718,12 @@ class _AddIngredientSheetState extends ConsumerState<AddIngredientSheet> {
 
   Widget _buildBatchRow(int index, {String? label}) {
     final row = _batchRows[index];
-    final expired = row.expireDate != null &&
-        row.expireDate!.isBefore(DateTime.now());
-    final soon = !expired &&
+    final expired =
+        row.expireDate != null && row.expireDate!.isBefore(DateTime.now());
+    final soon =
+        !expired &&
         row.expireDate != null &&
-        row.expireDate!
-            .isBefore(DateTime.now().add(const Duration(days: 3)));
+        row.expireDate!.isBefore(DateTime.now().add(const Duration(days: 3)));
 
     return Padding(
       padding: const EdgeInsets.only(bottom: 6),
@@ -626,79 +733,92 @@ class _AddIngredientSheetState extends ConsumerState<AddIngredientSheet> {
           if (label != null)
             Padding(
               padding: const EdgeInsets.only(bottom: 4),
-              child: Text(label,
-                  style: TextStyle(fontSize: 11, color: Colors.grey.shade600)),
+              child: Text(
+                label,
+                style: TextStyle(fontSize: 11, color: Colors.grey.shade600),
+              ),
             ),
           Row(
-        children: [
-          Expanded(
-            flex: 2,
-            child: TextField(
-              controller: row.qtyCtrl,
-              decoration: const InputDecoration(
-                  labelText: 'Qty',
-                  border: OutlineInputBorder(),
-                  isDense: true),
-              keyboardType:
-                  const TextInputType.numberWithOptions(decimal: true),
-            ),
-          ),
-          const SizedBox(width: 8),
-          Expanded(
-            flex: 3,
-            child: OutlinedButton.icon(
-              style: OutlinedButton.styleFrom(
-                side: BorderSide(
+            children: [
+              Expanded(
+                flex: 2,
+                child: Builder(
+                  builder: (context) {
+                    final v = double.tryParse(row.qtyCtrl.text);
+                    final invalid =
+                        row.qtyCtrl.text.isNotEmpty && (v == null || v <= 0);
+                    return TextField(
+                      controller: row.qtyCtrl,
+                      decoration: InputDecoration(
+                        labelText: 'Qty',
+                        border: const OutlineInputBorder(),
+                        isDense: true,
+                        errorText: invalid ? '> 0' : null,
+                      ),
+                      keyboardType: const TextInputType.numberWithOptions(
+                        decimal: true,
+                      ),
+                    );
+                  },
+                ),
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                flex: 3,
+                child: OutlinedButton.icon(
+                  style: OutlinedButton.styleFrom(
+                    side: BorderSide(
+                      color: expired
+                          ? Colors.red
+                          : soon
+                          ? Colors.orange
+                          : Colors.grey.shade400,
+                    ),
+                  ),
+                  onPressed: () => _pickDate(
+                    initial: row.expireDate,
+                    onPicked: (d) => setState(() => row.expireDate = d),
+                  ),
+                  icon: Icon(
+                    expired
+                        ? Icons.error
+                        : soon
+                        ? Icons.schedule
+                        : Icons.calendar_today,
+                    size: 14,
                     color: expired
                         ? Colors.red
                         : soon
-                            ? Colors.orange
-                            : Colors.grey.shade400),
-              ),
-              onPressed: () => _pickDate(
-                initial: row.expireDate,
-                onPicked: (d) => setState(() => row.expireDate = d),
-              ),
-              icon: Icon(
-                expired
-                    ? Icons.error
-                    : soon
-                        ? Icons.schedule
-                        : Icons.calendar_today,
-                size: 14,
-                color: expired
-                    ? Colors.red
-                    : soon
                         ? Colors.orange
                         : null,
-              ),
-              label: Text(
-                row.expireDate != null
-                    ? DateFormat.yMMMd().format(row.expireDate!)
-                    : 'No date',
-                style: TextStyle(
-                  fontSize: 12,
-                  color: expired
-                      ? Colors.red
-                      : soon
+                  ),
+                  label: Text(
+                    row.expireDate != null
+                        ? DateFormat.yMMMd().format(row.expireDate!)
+                        : 'No date',
+                    style: TextStyle(
+                      fontSize: 12,
+                      color: expired
+                          ? Colors.red
+                          : soon
                           ? Colors.orange
                           : null,
+                    ),
+                  ),
                 ),
               ),
-            ),
+              IconButton(
+                icon: const Icon(Icons.close, size: 18, color: Colors.red),
+                onPressed: _batchRows.length > 1
+                    ? () {
+                        _batchRows[index].dispose();
+                        setState(() => _batchRows.removeAt(index));
+                      }
+                    : null,
+                visualDensity: VisualDensity.compact,
+              ),
+            ],
           ),
-          IconButton(
-            icon: const Icon(Icons.close, size: 18, color: Colors.red),
-            onPressed: _batchRows.length > 1
-                ? () {
-                    _batchRows[index].dispose();
-                    setState(() => _batchRows.removeAt(index));
-                  }
-                : null,
-            visualDensity: VisualDensity.compact,
-          ),
-        ],
-      ),
         ],
       ),
     );

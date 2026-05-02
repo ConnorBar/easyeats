@@ -79,7 +79,7 @@ class _RecipesScreenState extends ConsumerState<RecipesScreen> {
     Navigator.push(
       context,
       MaterialPageRoute(
-          builder: (_) => RecipeDetailScreen(recipe: recipe)),
+          builder: (_) => RecipeDetailScreen(recipeId: recipe.id)),
     );
   }
 

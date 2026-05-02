@@ -42,8 +42,10 @@ async def shopping_list(request: MealPlanRequest):
     for entry in request.items:
         if entry.portions <= 0:
             continue
+        """ makes sure objectid is valid with our mongo """
         if not ObjectId.is_valid(entry.recipe_id):
             continue
+        """ makes sure objectid is valid with our mongo """
         doc = await recipes_collection.find_one({"_id": ObjectId(entry.recipe_id)})
         if not doc:
             continue
@@ -94,9 +96,9 @@ async def shopping_list(request: MealPlanRequest):
 
 @router.get("/recipes")
 async def recipe_report(
-    availability: Optional[str] = Query(None, description="Comma-separated statuses"),
-    ingredients: Optional[str] = Query(None, description="Comma-separated ingredient names"),
-    min_ingredients: Optional[int] = Query(None, description="Minimum ingredient count"),
+    availability: Optional[str] = Query(None, max_length=100, description="Comma-separated statuses"),
+    ingredients: Optional[str] = Query(None, max_length=500, description="Comma-separated ingredient names"),
+    min_ingredients: Optional[int] = Query(None, ge=0, le=100, description="Minimum ingredient count"),
 ):
     inv_map: dict = {}
     async for item in inventory_collection.find():

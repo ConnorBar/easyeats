@@ -8,13 +8,36 @@ import '../models/recipe.dart';
 import '../widgets/add_edit_recipe_sheet.dart';
 
 class RecipeDetailScreen extends ConsumerWidget {
-  final Recipe recipe;
+  final String recipeId;
 
-  const RecipeDetailScreen({super.key, required this.recipe});
+  const RecipeDetailScreen({super.key, required this.recipeId});
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    // Watch the live list so this screen rebuilds automatically after an edit.
+    final recipesAsync = ref.watch(recipesProvider);
     final inventoryAsync = ref.watch(inventoryProvider);
+
+    if (!recipesAsync.hasValue) {
+      return Scaffold(
+        appBar: AppBar(),
+        body: const Center(child: CircularProgressIndicator()),
+      );
+    }
+
+    // Look up the latest version of this recipe by ID.
+    final recipe = recipesAsync.value!
+        .where((r) => r.id == recipeId)
+        .firstOrNull;
+
+    // Recipe was deleted elsewhere — just close.
+    if (recipe == null) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (context.mounted) Navigator.pop(context);
+      });
+      return Scaffold(appBar: AppBar(), body: const SizedBox.shrink());
+    }
+
     final invMap = <String, InventoryItem>{};
     if (inventoryAsync.hasValue) {
       for (final item in inventoryAsync.value!) {
@@ -36,7 +59,7 @@ class RecipeDetailScreen extends ConsumerWidget {
           ),
           IconButton(
             icon: const Icon(Icons.delete),
-            onPressed: () => _confirmDelete(context, ref),
+            onPressed: () => _confirmDelete(context, ref, recipe),
           ),
         ],
       ),
@@ -44,7 +67,7 @@ class RecipeDetailScreen extends ConsumerWidget {
         padding: const EdgeInsets.all(16),
         children: [
           // ── availability badge ──
-          _availabilityBanner(context),
+          _availabilityBanner(context, recipe),
           const SizedBox(height: 12),
           Text(recipe.description,
               style: Theme.of(context).textTheme.bodyLarge),
@@ -95,13 +118,13 @@ class RecipeDetailScreen extends ConsumerWidget {
             );
           }),
           const SizedBox(height: 32),
-          _completeButton(context, ref),
+          _completeButton(context, ref, recipe),
         ],
       ),
     );
   }
 
-  Widget _availabilityBanner(BuildContext context) {
+  Widget _availabilityBanner(BuildContext context, Recipe recipe) {
     Color bg;
     String label;
     switch (recipe.availability) {
@@ -131,18 +154,18 @@ class RecipeDetailScreen extends ConsumerWidget {
     );
   }
 
-  Widget _completeButton(BuildContext context, WidgetRef ref) {
+  Widget _completeButton(BuildContext context, WidgetRef ref, Recipe recipe) {
     final enabled = recipe.availability != 'unavailable';
     return FilledButton.icon(
       onPressed: enabled
-          ? () => _handleComplete(context, ref)
+          ? () => _handleComplete(context, ref, recipe)
           : null,
       icon: const Icon(Icons.check_circle_outline),
       label: const Text('Mark Complete'),
     );
   }
 
-  Future<void> _handleComplete(BuildContext context, WidgetRef ref) async {
+  Future<void> _handleComplete(BuildContext context, WidgetRef ref, Recipe recipe) async {
     if (recipe.availability == 'partial') {
       final ok = await showDialog<bool>(
         context: context,
@@ -173,7 +196,7 @@ class RecipeDetailScreen extends ConsumerWidget {
     }
   }
 
-  Future<void> _confirmDelete(BuildContext context, WidgetRef ref) async {
+  Future<void> _confirmDelete(BuildContext context, WidgetRef ref, Recipe recipe) async {
     final ok = await showDialog<bool>(
       context: context,
       builder: (_) => AlertDialog(

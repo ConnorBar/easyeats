@@ -20,11 +20,11 @@ class RecipeIngredient {
       );
 
   Map<String, dynamic> toJson() => {
-        'ingredientId': ingredientId,
-        'name': name,
-        'quantity': quantity,
-        'unit': unit,
-      };
+    'ingredientId': ingredientId,
+    'name': name,
+    'quantity': quantity,
+    'unit': unit,
+  };
 }
 
 class MissingIngredient {
@@ -66,20 +66,21 @@ class Recipe {
     this.missingIngredients = const [],
   });
 
+  // dynamically make the ingredient types
   factory Recipe.fromJson(Map<String, dynamic> json) => Recipe(
-        id: json['id'] ?? '',
-        name: json['name'] ?? '',
-        description: json['description'] ?? '',
-        ingredients: (json['ingredients'] as List<dynamic>?)
-                ?.map((e) =>
-                    RecipeIngredient.fromJson(e as Map<String, dynamic>))
-                .toList() ??
-            [],
-        availability: json['availability'] ?? 'unavailable',
-        missingIngredients: (json['missing_ingredients'] as List<dynamic>?)
-                ?.map((e) =>
-                    MissingIngredient.fromJson(e as Map<String, dynamic>))
-                .toList() ??
-            [],
-      );
+    id: json['id'] ?? '',
+    name: json['name'] ?? '',
+    description: json['description'] ?? '',
+    ingredients:
+        (json['ingredients'] as List<dynamic>?)
+            ?.map((e) => RecipeIngredient.fromJson(e as Map<String, dynamic>))
+            .toList() ??
+        [],
+    availability: json['availability'] ?? 'unavailable',
+    missingIngredients:
+        (json['missing_ingredients'] as List<dynamic>?)
+            ?.map((e) => MissingIngredient.fromJson(e as Map<String, dynamic>))
+            .toList() ??
+        [],
+  );
 }

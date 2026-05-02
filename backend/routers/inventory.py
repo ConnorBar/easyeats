@@ -46,7 +46,6 @@ def _doc_to_response(doc: dict) -> dict:
     }
 
 
-# DYNAMIC FROM DB: Returns all inventory items directly from MongoDB.
 @router.get("", response_model=list[InventoryItemResponse])
 async def list_inventory():
     items = []
@@ -57,12 +56,19 @@ async def list_inventory():
 
 @router.post("", response_model=InventoryItemResponse, status_code=201)
 async def add_inventory_item(item: InventoryItemCreate):
+    # Only create an initial batch when quantity > 0.
+    # quantity=0 is used by the recipe sheet to register a placeholder ingredient
+    # that doesn't exist in the pantry yet; no batch means availability correctly
+    # reports it as missing rather than present-with-zero-stock.
+    initial_batches = (
+        [{"quantity": item.quantity, "expireDate": item.expireDate}]
+        if item.quantity > 0
+        else []
+    )
     doc = {
         "name": item.name,
         "unit": item.unit,
-        "batches": [
-            {"quantity": item.quantity, "expireDate": item.expireDate}
-        ],
+        "batches": initial_batches,
         "priceHistory": [e.model_dump() for e in item.priceHistory],
     }
     result = await inventory_collection.insert_one(doc)
@@ -72,8 +78,10 @@ async def add_inventory_item(item: InventoryItemCreate):
 
 @router.put("/{item_id}", response_model=InventoryItemResponse)
 async def update_inventory_item(item_id: str, item: InventoryItemUpdate):
+    """ makes sure objectid is valid with our mongo """
     if not ObjectId.is_valid(item_id):
         raise HTTPException(status_code=400, detail="Invalid ID")
+    """ makes sure objectid is valid with our mongo """
 
     update_data: dict = {}
     if item.name is not None:
@@ -101,8 +109,10 @@ async def update_inventory_item(item_id: str, item: InventoryItemUpdate):
 @router.post("/{item_id}/batch", response_model=InventoryItemResponse)
 async def add_batch(item_id: str, batch: Batch):
     """Append a new batch to an existing inventory item."""
+    """ makes sure objectid is valid with our mongo """
     if not ObjectId.is_valid(item_id):
         raise HTTPException(status_code=400, detail="Invalid ID")
+    """ makes sure objectid is valid with our mongo """
 
     # Migrate legacy docs first
     existing = await inventory_collection.find_one({"_id": ObjectId(item_id)})

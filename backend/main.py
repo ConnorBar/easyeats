@@ -1,9 +1,18 @@
+from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from routers import inventory, recipes, report
+from database import create_indexes
 
-app = FastAPI(title="FridgeBridge API")
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    await create_indexes()
+    yield
+
+
+app = FastAPI(title="FridgeBridge API", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,

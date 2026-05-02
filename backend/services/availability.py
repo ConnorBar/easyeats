@@ -1,6 +1,9 @@
 from typing import Tuple, List, Dict, Any
 
 
+"""
+purely backend - no user input
+"""
 def compute_availability(
     recipe: Dict[str, Any],
     inventory_map: Dict[str, Dict[str, Any]],

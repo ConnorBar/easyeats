@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../api/client.dart' show friendlyApiError;
 import '../api/inventory_api.dart';
 import '../api/recipes_api.dart';
 import '../models/inventory_item.dart';
@@ -47,15 +48,47 @@ class _AddEditRecipeSheetState extends ConsumerState<AddEditRecipeSheet> {
   List<InventoryItem> _inventory = [];
   bool _saving = false;
 
+  void _rebuild() => setState(() {});
+
+  bool get _canSave {
+    if (_saving) return false;
+    if (_nameCtrl.text.trim().isEmpty) return false;
+    final named = _rows.where((r) => r.name.trim().isNotEmpty).toList();
+    if (named.isEmpty) return false;
+    // Every named row must have a valid qty > 0
+    return named.every((r) {
+      final v = double.tryParse(r.qtyController.text);
+      return v != null && v > 0;
+    });
+  }
+
+  /// Creates a row and attaches the rebuild listener to its qty controller.
+  _IngredientRowData _makeRow({
+    String? ingredientId,
+    String name = '',
+    String? qty,
+    String? unit,
+  }) {
+    final row = _IngredientRowData(
+      ingredientId: ingredientId,
+      name: name,
+      qty: qty,
+      unit: unit,
+    );
+    row.qtyController.addListener(_rebuild);
+    return row;
+  }
+
   @override
   void initState() {
     super.initState();
+    _nameCtrl.addListener(_rebuild);
     final r = widget.recipe;
     if (r != null) {
       _nameCtrl.text = r.name;
       _descCtrl.text = r.description;
       for (final ing in r.ingredients) {
-        _rows.add(_IngredientRowData(
+        _rows.add(_makeRow(
           ingredientId: ing.ingredientId,
           name: ing.name,
           qty: _fmtQty(ing.quantity),
@@ -69,7 +102,7 @@ class _AddEditRecipeSheetState extends ConsumerState<AddEditRecipeSheet> {
   String _fmtQty(double q) =>
       q == q.roundToDouble() ? q.toInt().toString() : q.toStringAsFixed(2);
 
-  void _addRow() => setState(() => _rows.add(_IngredientRowData()));
+  void _addRow() => setState(() => _rows.add(_makeRow()));
 
   void _removeRow(int i) {
     _rows[i].dispose();
@@ -89,77 +122,96 @@ class _AddEditRecipeSheetState extends ConsumerState<AddEditRecipeSheet> {
   Future<void> _save() async {
     final name = _nameCtrl.text.trim();
     final desc = _descCtrl.text.trim();
+
+    // All validation before touching _saving so button never gets stuck.
     if (name.isEmpty) {
       ScaffoldMessenger.of(context)
         ..clearSnackBars()
-        ..showSnackBar(
-            const SnackBar(content: Text('Recipe name is required')));
+        ..showSnackBar(const SnackBar(content: Text('Recipe name is required')));
       return;
     }
 
-    // Resolve or create inventory items for every ingredient row.
-    // If the ingredient exists in inventory, link by ID.
-    // If it doesn't exist, create it with quantity 0 so the availability
-    // logic correctly flags it as missing.
     final validRows = _rows.where((r) => r.name.trim().isNotEmpty).toList();
-
     if (validRows.isEmpty) {
       ScaffoldMessenger.of(context)
         ..clearSnackBars()
-        ..showSnackBar(
-            const SnackBar(content: Text('Add at least one ingredient')));
+        ..showSnackBar(const SnackBar(content: Text('Add at least one ingredient')));
       return;
     }
 
-    setState(() => _saving = true);
-
     for (final r in validRows) {
-      if (r.ingredientId == null) {
-        final match = _inventory
-            .where((item) =>
-                item.name.toLowerCase() == r.name.trim().toLowerCase())
-            .toList();
-        if (match.isNotEmpty) {
-          r.ingredientId = match.first.id;
-          r.name = match.first.name;
-        } else {
-          final unit = r.unitController.text.trim().isNotEmpty
-              ? r.unitController.text.trim()
-              : 'whole';
-          final created = await InventoryApi.create({
-            'name': r.name.trim(),
-            'quantity': 0,
-            'unit': unit,
-          });
-          r.ingredientId = created.id;
-          r.name = created.name;
-        }
+      final qty = double.tryParse(r.qtyController.text);
+      if (qty == null || qty <= 0) {
+        ScaffoldMessenger.of(context)
+          ..clearSnackBars()
+          ..showSnackBar(SnackBar(
+            content: Text('"${r.name.trim()}" needs a valid quantity greater than 0'),
+          ));
+        return;
       }
     }
 
-    final ingredients = validRows
-        .map((r) => <String, dynamic>{
-              'ingredientId': r.ingredientId,
-              'name': r.name,
-              'quantity': double.tryParse(r.qtyController.text) ?? 0,
-              'unit': r.unitController.text,
-            })
-        .toList();
+    setState(() => _saving = true);
+    try {
+      // Resolve or create inventory items for every ingredient row.
+      // If the ingredient exists in inventory, link by ID.
+      // If it doesn't exist, create it with quantity 0 so the availability
+      // logic correctly flags it as missing.
+      for (final r in validRows) {
+        if (r.ingredientId == null) {
+          final match = _inventory
+              .where((item) =>
+                  item.name.toLowerCase() == r.name.trim().toLowerCase())
+              .toList();
+          if (match.isNotEmpty) {
+            r.ingredientId = match.first.id;
+            r.name = match.first.name;
+          } else {
+            final unit = r.unitController.text.trim().isNotEmpty
+                ? r.unitController.text.trim()
+                : 'whole';
+            final created = await InventoryApi.create({
+              'name': r.name.trim(),
+              'quantity': 0,
+              'unit': unit,
+            });
+            r.ingredientId = created.id;
+            r.name = created.name;
+          }
+        }
+      }
 
-    final data = <String, dynamic>{
-      'name': name,
-      'description': desc,
-      'ingredients': ingredients,
-    };
+      final ingredients = validRows
+          .map((r) => <String, dynamic>{
+                'ingredientId': r.ingredientId,
+                'name': r.name,
+                'quantity': double.parse(r.qtyController.text),
+                'unit': r.unitController.text,
+              })
+          .toList();
 
-    if (widget.recipe != null) {
-      await RecipesApi.update(widget.recipe!.id, data);
-    } else {
-      await RecipesApi.create(data);
+      final data = <String, dynamic>{
+        'name': name,
+        'description': desc,
+        'ingredients': ingredients,
+      };
+
+      if (widget.recipe != null) {
+        await RecipesApi.update(widget.recipe!.id, data);
+      } else {
+        await RecipesApi.create(data);
+      }
+      ref.invalidate(recipesProvider);
+      ref.invalidate(inventoryProvider);
+      if (mounted) Navigator.pop(context);
+    } catch (e) {
+      if (mounted) {
+        setState(() => _saving = false);
+        ScaffoldMessenger.of(context)
+          ..clearSnackBars()
+          ..showSnackBar(SnackBar(content: Text(friendlyApiError(e))));
+      }
     }
-    ref.invalidate(recipesProvider);
-    ref.invalidate(inventoryProvider);
-    if (mounted) Navigator.pop(context);
   }
 
   @override
@@ -193,6 +245,7 @@ class _AddEditRecipeSheetState extends ConsumerState<AddEditRecipeSheet> {
           decoration: const InputDecoration(
               labelText: 'Recipe Name', border: OutlineInputBorder()),
           textCapitalization: TextCapitalization.words,
+          maxLength: 100,
         ),
         const SizedBox(height: 12),
         TextField(
@@ -201,6 +254,7 @@ class _AddEditRecipeSheetState extends ConsumerState<AddEditRecipeSheet> {
               labelText: 'Description', border: OutlineInputBorder()),
           maxLines: 3,
           textCapitalization: TextCapitalization.sentences,
+          maxLength: 1000,
         ),
         const SizedBox(height: 20),
         Text('Ingredients', style: Theme.of(context).textTheme.titleMedium),
@@ -217,7 +271,7 @@ class _AddEditRecipeSheetState extends ConsumerState<AddEditRecipeSheet> {
         ),
         const SizedBox(height: 24),
         FilledButton(
-          onPressed: _saving ? null : _save,
+          onPressed: _canSave ? _save : null,
           child: _saving
               ? const SizedBox(
                   height: 20,
@@ -264,10 +318,13 @@ class _AddEditRecipeSheetState extends ConsumerState<AddEditRecipeSheet> {
                     decoration: const InputDecoration(
                         labelText: 'Ingredient',
                         border: OutlineInputBorder(),
-                        isDense: true),
+                        isDense: true,
+                        counterText: ''),
+                    maxLength: 100,
                     onChanged: (v) {
                       row.name = v;
                       row.ingredientId = null;
+                      _rebuild(); // recheck canSave when name changes
                     },
                   );
                 },
@@ -275,15 +332,22 @@ class _AddEditRecipeSheetState extends ConsumerState<AddEditRecipeSheet> {
             ),
             const SizedBox(width: 6),
             Expanded(
-              child: TextField(
-                controller: row.qtyController,
-                decoration: const InputDecoration(
-                    labelText: 'Qty',
-                    border: OutlineInputBorder(),
-                    isDense: true),
-                keyboardType:
-                    const TextInputType.numberWithOptions(decimal: true),
-              ),
+              child: Builder(builder: (context) {
+                final v = double.tryParse(row.qtyController.text);
+                final invalid = row.name.trim().isNotEmpty &&
+                    row.qtyController.text.isNotEmpty &&
+                    (v == null || v <= 0);
+                return TextField(
+                  controller: row.qtyController,
+                  decoration: InputDecoration(
+                      labelText: 'Qty',
+                      border: const OutlineInputBorder(),
+                      isDense: true,
+                      errorText: invalid ? '> 0' : null),
+                  keyboardType:
+                      const TextInputType.numberWithOptions(decimal: true),
+                );
+              }),
             ),
             const SizedBox(width: 6),
             Expanded(
@@ -292,7 +356,9 @@ class _AddEditRecipeSheetState extends ConsumerState<AddEditRecipeSheet> {
                 decoration: const InputDecoration(
                     labelText: 'Unit',
                     border: OutlineInputBorder(),
-                    isDense: true),
+                    isDense: true,
+                    counterText: ''),
+                maxLength: 20,
               ),
             ),
             IconButton(
